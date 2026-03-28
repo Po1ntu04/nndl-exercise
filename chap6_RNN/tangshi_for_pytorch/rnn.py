@@ -1,82 +1,96 @@
-import torch.nn as nn
+import numpy as np
 import torch
-from torch.autograd import Variable
+import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
 
-def weights_init(m):
-    classname = m.__class__.__name__  #   obtain the class name
-    if classname.find('Linear') != -1:
-        weight_shape = list(m.weight.data.size())
+def weights_init(module):
+    classname = module.__class__.__name__
+    if classname.find("Linear") != -1:
+        weight_shape = list(module.weight.data.size())
         fan_in = weight_shape[1]
         fan_out = weight_shape[0]
-        w_bound = np.sqrt(6. / (fan_in + fan_out))
-        m.weight.data.uniform_(-w_bound, w_bound)
-        m.bias.data.fill_(0)
-        print("inital  linear weight ")
+        w_bound = np.sqrt(6.0 / (fan_in + fan_out))
+        module.weight.data.uniform_(-w_bound, w_bound)
+        module.bias.data.fill_(0)
+        print("inital linear weight")
 
 
 class word_embedding(nn.Module):
-    def __init__(self,vocab_length , embedding_dim):
+    def __init__(self, vocab_length, embedding_dim):
         super(word_embedding, self).__init__()
-        w_embeding_random_intial = np.random.uniform(-1,1,size=(vocab_length ,embedding_dim))
-        self.word_embedding = nn.Embedding(vocab_length,embedding_dim)
-        self.word_embedding.weight.data.copy_(torch.from_numpy(w_embeding_random_intial))
-    def forward(self,input_sentence):
+        embedding_init = np.random.uniform(-1, 1, size=(vocab_length, embedding_dim)).astype(np.float32)
+        self.word_embedding = nn.Embedding(vocab_length, embedding_dim)
+        self.word_embedding.weight.data.copy_(torch.from_numpy(embedding_init))
+
+    def forward(self, input_sentence):
         """
-        :param input_sentence:  a tensor ,contain several word index.
-        :return: a tensor ,contain word embedding tensor
+        :param input_sentence: tensor containing word indices.
+        :return: tensor containing word embeddings.
         """
-        sen_embed = self.word_embedding(input_sentence)
-        return sen_embed
+        return self.word_embedding(input_sentence)
 
 
 class RNN_model(nn.Module):
-    def __init__(self, batch_sz ,vocab_len ,word_embedding,embedding_dim, lstm_hidden_dim):
-        super(RNN_model,self).__init__()
+    def __init__(
+        self,
+        batch_sz,
+        vocab_len,
+        word_embedding,
+        embedding_dim,
+        lstm_hidden_dim,
+        model_type="lstm",
+    ):
+        super(RNN_model, self).__init__()
 
         self.word_embedding_lookup = word_embedding
         self.batch_size = batch_sz
         self.vocab_length = vocab_len
         self.word_embedding_dim = embedding_dim
-        self.lstm_dim = lstm_hidden_dim
-        #########################################
-        # here you need to define the "self.rnn_lstm"  the input size is "embedding_dim" and the output size is "lstm_hidden_dim"
-        # the lstm should have two layers, and the  input and output tensors are provided as (batch, seq, feature)
-        # ???
+        self.hidden_dim = lstm_hidden_dim
+        self.model_type = model_type.lower()
+        self.num_layers = 2
 
+        if self.model_type == "lstm":
+            self.recurrent = nn.LSTM(
+                input_size=embedding_dim,
+                hidden_size=lstm_hidden_dim,
+                num_layers=self.num_layers,
+                batch_first=True,
+            )
+        elif self.model_type == "rnn":
+            self.recurrent = nn.RNN(
+                input_size=embedding_dim,
+                hidden_size=lstm_hidden_dim,
+                num_layers=self.num_layers,
+                nonlinearity="tanh",
+                batch_first=True,
+            )
+        else:
+            raise ValueError(f"Unsupported model_type: {model_type}")
 
+        self.fc = nn.Linear(lstm_hidden_dim, vocab_len)
+        self.apply(weights_init)
+        self.softmax = nn.LogSoftmax(dim=1)
 
-        ##########################################
-        self.fc = nn.Linear(lstm_hidden_dim, vocab_len )
-        self.apply(weights_init) # call the weights initial function.
+    def forward(self, sentence, is_test=False):
+        batch_input = self.word_embedding_lookup(sentence)
+        if batch_input.dim() == 2:
+            batch_input = batch_input.unsqueeze(0)
+        batch_size = batch_input.size(0)
 
-        self.softmax = nn.LogSoftmax() # the activation function.
-        # self.tanh = nn.Tanh()
-    def forward(self,sentence,is_test = False):
-        batch_input = self.word_embedding_lookup(sentence).view(1,-1,self.word_embedding_dim)
-        # print(batch_input.size()) # print the size of the input
-        ################################################
-        # here you need to put the "batch_input"  input the self.lstm which is defined before.
-        # the hidden output should be named as output, the initial hidden state and cell state set to zero.
-        # ???
+        if self.model_type == "lstm":
+            h0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=batch_input.device)
+            c0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=batch_input.device)
+            output, _ = self.recurrent(batch_input, (h0, c0))
+        else:
+            h0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=batch_input.device)
+            output, _ = self.recurrent(batch_input, h0)
 
-
-
-
-        ################################################
-        out = output.contiguous().view(-1,self.lstm_dim)
-
-        out =  F.relu(self.fc(out))
-
+        out = output.contiguous().view(-1, self.hidden_dim)
+        out = F.relu(self.fc(out))
         out = self.softmax(out)
 
         if is_test:
-            prediction = out[ -1, : ].view(1,-1)
-            output = prediction
-        else:
-           output = out
-        # print(out)
-        return output
-
+            return out[-1, :].view(1, -1)
+        return out
